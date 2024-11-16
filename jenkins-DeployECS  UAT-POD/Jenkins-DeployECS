@@ -1,0 +1,113 @@
+// Front end to UAT and Prod deploy pipelines (unifies parameters etc)
+
+def git = new org.arq.git()
+def GITHUB_CREDS = 'ghCredentials' 
+
+def AWS_CLUSTER_PREFIX = "ecs-" // Prefix Environment
+def AWS_REGION = "ap-southeast-2"
+def AWS_ROLE = "JenkinsRole"
+
+def AWS_PROD_ACC = [
+    "AccountName": "aws-prod",
+    "AccountId": "12345",
+    "Environment": "production" ] 
+
+def AWS_UAT_ACC = [
+    "AccountName": "aws-uat",
+    "AccountId" : "12346",
+    "Environment": "uat" ]
+
+def TARGET_ENV = []
+
+pipeline {
+    agent { label 'slave-small' }
+    parameters {
+        choice (name: 'Service', description: 'Service to build', 
+            choices: [
+                'frontend-service',
+                'cc-validation-service'
+                ])
+        string (name: 'Branch', description: "Branch to build from", defaultValue: 'master')
+        booleanParam (defaultValue: true, description: 'Update ECS Service', name: 'Trigger CodeDeploy Deployment')
+        booleanParam (defaultValue: false, description: 'Bypass Deployment Hook Test', name: 'Skip Deployment Test')
+        choice (name: 'Environment', description: 'Selecting production will copy the in-use image from uat', choices: [
+            "production","uat" ])
+        choice (name: 'Deployment Configuration', description: '', choices: [
+            "Canary 10 Percent 5 Minutes",
+            "Canary 10 Percent 15 Minutes",
+            "Linear 10 Percent Every 1 Minutes",
+            "Linear 10 PercentEvery 3 Minutes",
+            "All At Once"
+            ])
+    }
+    environment {
+        SERVICE_NAME = "${params.Service}"
+        ECS_SERVICE = "nrg-${params.Service}"
+        GITHUB_REPO = "git@github.com:melbourneit/nrg-${params.Service}.git"
+        GIT_SOURCE_BRANCH = "${params.'Branch'}"
+        TRIGGER_DEPLOY = "${params.'Trigger CodeDeploy Deployment'}"
+        DEPLOY_CONFIG = "CodeDeployDefault.ECS${params.'Deployment Configuration'.replace(' ','')}"
+        SKIP_DEPLOY_TEST = "${params.'Skip Deployment Test'}"
+    }
+    stages { 
+        stage('Preparing Pipeline') { 
+            steps {
+                cleanWs()
+                script {   
+                    failedStage=env.STAGE_NAME
+                    buildStartedBy = whoStartedJob()
+                    AWS_TARGET_ACC = params.Environment == "production" ? AWS_PROD_ACC : AWS_UAT_ACC
+                    ecr_name = ECS_SERVICE
+                }
+            }
+        }
+        stage('UAT Release') {
+            when {
+                expression {
+                    return AWS_TARGET_ACC.Environment == "uat"
+                }
+            }
+            steps {
+                script {
+                    ecr_image_path = "${AWS_TARGET_ACC.AccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ecr_name}"
+                    cluster_name = AWS_CLUSTER_PREFIX + AWS_TARGET_ACC.Environment
+
+                    build job: "uat-deploy-service", parameters: [
+                        string(name: 'Service', value: SERVICE_NAME),
+                        string(name: 'Branch', value: GIT_SOURCE_BRANCH),
+                        booleanParam(name: 'TriggerCodeDeployDeployment', value: TRIGGER_DEPLOY),
+                        booleanParam(name: 'SkipDeploymentTest', value: SKIP_DEPLOY_TEST),
+                        string(name: 'DeploymentConfiguration', value: DEPLOY_CONFIG),
+                        string(name: 'repo', value: GITHUB_REPO),
+                        string(name: 'ecrImage', value: ecr_image_path),
+                        string(name: 'accountId', value: AWS_TARGET_ACC.AccountId),
+                        string(name: 'startedBy', value: buildStartedBy)
+                        ]
+                }
+            }
+        }
+        stage('Production Release') {
+            when {
+                expression {
+                    return AWS_TARGET_ACC.Environment == "production"
+                }
+            }
+            steps {
+                script {
+                    uat_cluster_name = AWS_CLUSTER_PREFIX + AWS_UAT_ACC.Environment
+
+                    build job: "prod-deploy-service", parameters: [
+                        string(name: 'Service', value: SERVICE_NAME),
+                        booleanParam(name: 'TriggerCodeDeployDeployment', value: TRIGGER_DEPLOY),
+                        booleanParam(name: 'SkipDeploymentTest', value: SKIP_DEPLOY_TEST),
+                        string(name: 'DeploymentConfiguration', value: DEPLOY_CONFIG),
+                        string(name: 'uataccountId', value: AWS_UAT_ACC.AccountId),
+                        string(name: 'uatcluster', value: uat_cluster_name),
+                        string(name: 'startedBy', value: buildStartedBy),
+                        string(name: 'prodaccountId', value: AWS_PROD_ACC.AccountId)
+                    ]
+                }
+            }
+        }
+    }
+}

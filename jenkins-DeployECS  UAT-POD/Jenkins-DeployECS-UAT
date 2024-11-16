@@ -1,0 +1,155 @@
+def git = new org.lib.git()
+
+def GITHUB_CREDS = 'ghCredentials' 
+def AWS_REGION = "ap-southeast-2"
+
+def AWS_ROLE = "JenkinsRole"
+
+pipeline {
+    agent { label 'small-slave' }
+    parameters {
+        string (name: 'Service')
+        string (name: 'Branch', description: "Branch to build from", defaultValue: 'master')
+        booleanParam (defaultValue: true, description: 'Update ECS Service', name: 'TriggerCodeDeployDeployment')
+        booleanParam (defaultValue: false, description: 'Bypass Deployment Hook Test', name: 'SkipDeploymentTest')
+        string (name: 'repo')
+        string (name: 'DeploymentConfiguration')
+        string (name: 'accountId')
+        string(name: 'ecrImage')
+        string(name: 'startedBy')
+    }
+    environment {
+        SERVICE_NAME = "${params.Service}"
+        ECS_SERVICE = "${params.Service}"
+        GITHUB_REPO = "${params.repo}"
+        GIT_SOURCE_BRANCH = "${params.Branch}"
+        TRIGGER_DEPLOY = "${params.TriggerCodeDeployDeployment}"
+        SKIP_DEPLOY_TEST = "${params.SkipDeploymentTest}"
+        DEPLOY_CONFIG = "${params.DeploymentConfiguration}"
+        AWS_ACC_ID = "${params.accountId}"
+    }
+    stages { 
+        stage('Checkout Service') {
+            steps {
+                script {
+                    failedStage=env.STAGE_NAME
+                    gitRepo = git.checkOut(GITHUB_REPO, GITHUB_CREDS, env.GIT_SOURCE_BRANCH)
+                    echo "REPO Stuff: ${gitRepo}"
+                    sourceGitDetails = git.getCommitDetails()
+                    env.GIT_SOURCE_COMMIT_HASH = sourceGitDetails.hash
+                    env.GIT_SOURCE_COMMIT_TAG = sourceGitDetails.tag
+                    echo "GIT Details: ${sourceGitDetails}"
+                    // sh 'ls -R'
+                }
+            }
+        }
+        stage('Build Docker Image') { 
+            steps {
+                script {
+                    AWS_SERVICE_IMAGE = "${params.ecrImage}:build-${BUILD_NUMBER}"
+                    docker_image = docker.build(AWS_SERVICE_IMAGE)
+                }
+            }
+        }
+        stage('Push Docker Image') { 
+            steps {
+                script {
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${AWS_ACC_ID}", duration: 900, roleSessionName: 'jenkins-session')
+                    {
+                        docker_creds = ecrLogin()
+                        sh "${docker_creds}"
+
+                        docker_image.push()
+                    }
+                }
+            }
+        }
+        stage('Register New Task Definition') {
+            steps {
+                script {
+                    NEW_TASK = ecsNewTaskDefinition(ECS_SERVICE, AWS_SERVICE_IMAGE, AWS_ACC_ID, AWS_ROLE, AWS_REGION)
+                    echo "new task arn: ${NEW_TASK.taskDefinition.taskDefinitionArn}"
+                }
+            }
+        }
+        stage('Add Task Definition Tags') {
+            steps {
+                script {
+
+                    def awsTags = [
+                        git_hash: GIT_SOURCE_COMMIT_HASH, 
+                        git_tag: GIT_SOURCE_COMMIT_TAG, 
+                        git_repo: GITHUB_REPO,
+                        
+                        pipeline: BUILD_URL
+                    ]
+
+                    ecsTagTaskDefinition(
+                        AWS_ROLE, 
+                        AWS_ACC_ID, 
+                        NEW_TASK.taskDefinition.taskDefinitionArn,
+                        awsTags)
+                }
+            }
+        } 
+
+        stage('Deploy New Task') {
+            when {
+                expression {
+                    return TRIGGER_DEPLOY == "true"
+                }
+            }
+            steps {
+                script {
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${AWS_ACC_ID}", duration: 900, roleSessionName: 'jenkins-session')
+                    {
+                        if (SKIP_DEPLOY_TEST == "true") { test_hook = "" }
+                        else { 
+                            test_lambda_name = "${SERVICE_NAME}-deployment-test"
+                            try {
+                                lambda_check = sh (script:"aws lambda get-function --function-name ${test_lambda_name}", returnStdout: true)
+                                test_hook = ", \\\"hooks\\\":[{\\\"AfterAllowTestTraffic\\\": \\\"${test_lambda_name}\\\"}]" 
+                            } catch (err) {
+                                echo "Lambda not found for function, skipping post-deployment test"
+                                test_hook = ""
+                            }   
+                        }
+                        
+                        appspec = "\"{\\\"Resources\\\":[{\\\"TargetService\\\":{\\\"Type\\\":\\\"AWS::ECS::Service\\\", \\\"Properties\\\":{ \\\"TaskDefinition\\\":\\\"${NEW_TASK.taskDefinition.taskDefinitionArn}\\\", \\\"LoadBalancerInfo\\\":{\\\"ContainerName\\\":\\\"${ECS_SERVICE}\\\",\\\"ContainerPort\\\":\\\"80\\\"}}}}], \\\"version\\\":\\\"0.0\\\"}${test_hook} \""
+                        deploy_output = sh (                    
+                            script: "aws deploy create-deployment \
+                                --application-name ${ECS_SERVICE} \
+                                --deployment-group-name ${ECS_SERVICE}-dg \
+                                --revision '{\"revisionType\": \"AppSpecContent\",\"appSpecContent\":{\"content\": ${appspec}}}' \
+                                --deployment-config-name ${DEPLOY_CONFIG} \
+                                --description \"Initiated by: ${params.startedBy} - ${BUILD_URL}\" \
+                                --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE",
+                            returnStdout: true)
+                        echo "deploy_output: ${deploy_output}"
+                        output_json = readJSON text: deploy_output
+                        deployment_id = output_json["deploymentId"]
+                        echo "deployment_id: ${deployment_id}"
+                    }
+                }
+            }
+        }
+        stage('Wait for deployment to complete') {
+            when {
+                expression {
+                    return TRIGGER_DEPLOY == "true"
+                }
+            }
+            steps {
+                script {
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${AWS_ACC_ID}", duration: 900, roleSessionName: 'jenk-session')
+                    {
+                        wait_deploy_output = sh (
+                            script: "aws deploy wait deployment-successful --deployment-id ${deployment_id}",
+                            returnStdout: true)
+                        echo "wait_deploy_output: ${wait_deploy_output}"
+                    }
+                }
+            }
+        }
+    }
+}

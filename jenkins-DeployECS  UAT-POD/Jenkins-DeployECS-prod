@@ -1,0 +1,136 @@
+def git = new org.lib.git()
+
+def GITHUB_CREDS = 'ghCredentials' 
+def AWS_REGION = "ap-southeast-2"
+
+def AWS_ROLE = "JenkinsRole"
+
+pipeline {
+    agent { label 'slave-t2sm' }
+    parameters {
+        string (name: 'Service')
+        booleanParam (defaultValue: true, description: 'Update ECS Service', name: 'TriggerCodeDeployDeployment')
+        booleanParam (defaultValue: false, description: 'Bypass Deployment Hook Test', name: 'SkipDeploymentTest')
+        string (name: 'DeploymentConfiguration')
+        string (name: 'uataccountId')
+        string (name: 'prodaccountId')
+        string(name: 'startedBy')
+        string(name: 'uatcluster')
+    }
+    environment {
+        SERVICE_NAME = "${params.Service}"
+        ECS_SERVICE = "${params.Service}"
+        TRIGGER_DEPLOY = "${params.TriggerCodeDeployDeployment}"
+        SKIP_DEPLOY_TEST = "${params.SkipDeploymentTest}"
+        DEPLOY_CONFIG = "${params.DeploymentConfiguration}"
+        UAT_ACC_ID = "${params.uataccountId}"
+        PROD_ACC_ID = "${params.prodaccountId}"
+    }
+    stages { 
+        stage('Check uat service') {
+            steps {
+                script {
+                    uat_service = ecsLookupService(ECS_SERVICE, AWS_ROLE, UAT_ACC_ID, params.uatcluster)
+                    taskDefnARN = uat_service.taskDefinition
+                    echo "current uat task definition: ${taskDefnARN}"
+                    uat_task = ecsLookupTaskDefinition(taskDefnARN, AWS_ROLE, UAT_ACC_ID)
+                    echo "Current image: ${uat_task.image}"
+                }
+            }
+        }
+        stage('Pull image') {
+            steps {
+                script {
+                    echo "Pull image"
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${UAT_ACC_ID}", duration: 900, roleSessionName: 'jenk-session')
+                    {
+                        docker_creds = ecrLogin()
+                        sh "${docker_creds}"
+
+                        docker_image = docker.image(uat_task.image)
+                        docker_image.pull()
+                        
+                        new_tag = uat_task.image.replace(UAT_ACC_ID, PROD_ACC_ID)
+                    }
+                }
+            }
+        }
+        stage('Copy uat image to prod') {
+            steps {
+                script {
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${PROD_ACC_ID}", duration: 900, roleSessionName: 'jenk-session')
+                    {
+                        docker_creds = ecrLogin()
+                        sh "${docker_creds}"
+                        echo "Copying image to prod"
+                        sh "docker tag ${uat_task.image} ${new_tag}"
+                        sh "docker push ${new_tag}"
+                    }
+                }
+            }
+        }
+        stage('Create new task definition') {
+            steps {
+                script {
+                    echo "Create new task definition"
+                    NEW_TASK = ecsNewTaskDefinition(ECS_SERVICE, new_tag, PROD_ACC_ID, AWS_ROLE, AWS_REGION)
+                    echo "new task arn: ${NEW_TASK.taskDefinition.taskDefinitionArn}"
+                }
+            }
+        }
+        stage('Add Task Definition Tags') {
+            steps {
+                script {
+
+                    def awsTags = [
+                        triggeredBy: params.startedBy,                     
+                        pipeline: BUILD_URL
+                    ]
+
+                    ecsTagTaskDefinition(
+                        AWS_ROLE, 
+                        PROD_ACC_ID, 
+                        NEW_TASK.taskDefinition.taskDefinitionArn,
+                        awsTags)
+                }
+            }
+        } 
+        stage('Initiate Deployment') {
+            when {
+                expression {
+                    return TRIGGER_DEPLOY == "true"
+                }
+            }
+            steps {
+                script {
+                    withAWS(role:"${AWS_ROLE}", roleAccount:"${PROD_ACC_ID}", duration: 900, roleSessionName: 'jenk-session')
+                    {
+                        if (SKIP_DEPLOY_TEST == "true") { test_hook = "" }
+                        else { 
+                            test_lambda_name = "${SERVICE_NAME}-deployment-test"
+                            try {
+                                lambda_check = sh (script:"aws lambda get-function --function-name ${test_lambda_name}", returnStdout: true)
+                                test_hook = ", \\\"hooks\\\":[{\\\"AfterAllowTestTraffic\\\": \\\"${test_lambda_name}\\\"}]" 
+                            } catch (err) {
+                                echo "Lambda not found for function, skipping post-deployment test"
+                                test_hook = ""
+                            }   
+                        }
+                        
+                        appspec = "\"{\\\"Resources\\\":[{\\\"TargetService\\\":{\\\"Type\\\":\\\"AWS::ECS::Service\\\", \\\"Properties\\\":{ \\\"TaskDefinition\\\":\\\"${NEW_TASK.taskDefinition.taskDefinitionArn}\\\", \\\"LoadBalancerInfo\\\":{\\\"ContainerName\\\":\\\"${ECS_SERVICE}\\\",\\\"ContainerPort\\\":\\\"80\\\"}}}}], \\\"version\\\":\\\"0.0\\\"}${test_hook} \""
+                        deploy_output = sh (                    
+                            script: "aws deploy create-deployment \
+                                --application-name ${ECS_SERVICE} \
+                                --deployment-group-name ${ECS_SERVICE}-dg \
+                                --revision '{\"revisionType\": \"AppSpecContent\",\"appSpecContent\":{\"content\": ${appspec}}}' \
+                                --deployment-config-name ${DEPLOY_CONFIG} \
+                                --description \"Initiated by: ${params.startedBy} - ${BUILD_URL}\" \
+                                --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE",
+                            returnStdout: true)
+                        echo "deploy_output: ${deploy_output}"
+                    }
+                }
+            }
+        }
+    }
+}
