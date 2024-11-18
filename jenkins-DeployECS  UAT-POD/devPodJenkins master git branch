@@ -1,0 +1,269 @@
+// Deployment template for CMS-based websites (Drupal or Wordpress)
+// 
+//
+pipeline {
+    agent any
+
+    parameters {
+        choice choices: ['Dev', 'Staging', 'Production'], description: "Choose which environment to push changes to.", name: "DEPLOY_TO"
+        booleanParam defaultValue: true, "Choose whether to deploy the database.", name: "DEPLOY_DB"
+    }
+
+    environment {
+         SITEID = "lb"
+        NOFLAGS = "0"
+        DBNAME = "wpress_myproject"
+        DBSERVER = "dbserver"
+        DBUSER = "WordpressUser"
+        DBPASS = "hiddenpassword"
+        EXCLUDE = "domain_commentmeta,domain_comments"  // separate multiple tables with commas
+        DEPLOY_TO = "${params.DEPLOY_TO}"
+        DEPLOY_DB = "${params.DEPLOY_DB}"
+    }
+
+    stages {
+        stage("deploy-db-dev") {
+            when {
+                allOf { 
+                    environment ignoreCase: true, name: "DEPLOY_TO", value: "dev"; 
+                    environment ignoreCase: true, name: "DEPLOY_DB", value: "true"; 
+                }
+            }
+            steps {
+                // this stage only required until we make our dev the master DB
+                // copy full dev database from bolwebdev1
+                // import latest database dump to dev server
+                script {
+                    FILENM = sh(script: 'ls -t myproject-s-dump* | head -1', returnStdout: true)
+                }
+                //Fixing the problem with the collation existing in the sql dump file, refer to: https://stackoverflow.com/questions/42385099/1273-unknown-collation-utf8mb4-unicode-520-ci 
+                //apparently, this is due to a version of mysql issue. Once the problem is fixed from the server side we can then remove the following lines. 
+
+                sh """sed -i s/utf8mb4_unicode_520_ci/utf8mb4_unicode_ci/g ${FILENM}
+                # The following line was added because the site is pointing to a staging server which we don't have control over, again, once this is fixed we can delete the following line of code. 
+                sed -i s/myproject.staging.websites.3pth.com/myproject.example.net/g ${FILENM}
+                mysql -h devserver2 -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_dev < ${WORKSPACE}/${FILENM}
+                rm -f ${WORKSPACE}/${FILENM}"""
+        }
+        }
+        stage("deploy-dev") {
+            when {
+                environment ignoreCase: true, name: "DEPLOY_TO", value: "dev"
+            }
+            steps {
+                // copy files to devserver2
+                // NOTE: if we move the repo to SVN, we should change httpdocs/ to ${env.SITEID}docs/
+                sh """sudo chown jenkins:jenkins *
+
+                #Replace the wp-config.php file with our domain file with our information. 
+        /bin/cp httpdocs/wp-config-domain.php httpdocs/wp-config.php
+
+                # prepare the dev server to receive files by changing the owner
+                ssh webadmin@devserver2 'sudo chown -R webadmin:webadmin /var/opt/httpd/${env.SITEID}docs/'
+                # copy files from control server to dev
+                rsync --exclude=Jenkinsfile -rav -e ssh --delete ${WORKSPACE}/httpdocs/ webadmin@devserver2:/var/opt/httpd/${env.SITEID}docs/
+                # fix the owner/permissions on the dev server
+        ssh webadmin@devserver2 'sudo chown -R apache:${env.SITEID}-web /var/opt/httpd/${env.SITEID}docs/ && sudo chmod -R g+w /var/opt/httpd/${env.SITEID}docs/ && sudo find /var/opt/httpd/${env.SITEID}docs/ -type d -exec chmod g+s {} \\;'"""
+            }
+        }
+        stage("deploy-db-staging") {
+            when {
+                allOf { 
+                    environment ignoreCase: true, name: "DEPLOY_TO", value: "staging"; 
+                    environment ignoreCase: true, name: "DEPLOY_DB", value: "true"; 
+                }
+            }
+            steps {
+                script {
+                    def myexcludes = env.EXCLUDE.split(',').toList()
+                    MYFLAGS = "-Q -K -c -e --default-character-set=utf8 "
+                    if (env.NOFLAGS == "0") {
+                        myexcludes.each {
+                            MYFLAGS = "${MYFLAGS} --ignore-table=${env.DBNAME}_dev.${it}"
+                        }
+                    }
+                }
+                // pull a backup of the current dev database (may exclude some tables)
+                sh """mysqldump -h devserver2 -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_dev ${MYFLAGS} > ${env.DBNAME}_dev.sql
+        #Searching and replace for the URL to change from the dev sever to the staging server
+                sed -i s/myproject.example.net/stage-myproject.example.net/g ${env.DBNAME}_dev.sql
+
+        # create a backup copy of the current staging database (full backup)
+                mysqldump -h ${env.DBSERVER} -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_stage > ${env.DBNAME}_stage_bak.sql
+                # upload the dev database dump to the staging database
+                mysql -h ${env.DBSERVER} -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_stage < ${WORKSPACE}/${env.DBNAME}_dev.sql
+                rm -f ${WORKSPACE}/${env.DBNAME}_dev.sql"""
+       }
+        }
+        stage("deploy-staging") {
+            when {
+                environment ignoreCase: true, name: "DEPLOY_TO", value: "staging"
+            }
+            steps {
+                // copy files from dev to control server
+                sh """rsync --exclude=.svn --exclude=.git -rav -e ssh webadmin@devserver2:/var/opt/httpd/${env.SITEID}docs/ /tmp/${env.SITEID}docs/
+
+                #Replace the wp-config.php file with our domain file with our information. 
+            /bin/cp httpdocs/wp-config-domain.php httpdocs/wp-config.php
+
+                #prepare the staging server to receive files by changing the owner
+                ssh webadmin@stageserver 'sudo chown -R webadmin:webadmin /var/opt/httpd/${env.SITEID}docs/'
+                # copy files from control server to staging
+                rsync --exclude=.svn --exclude=.git -rav -e ssh --delete /tmp/${env.SITEID}docs/ webadmin@stageserver:/var/opt/httpd/${env.SITEID}docs/
+                # fix the owner/permissions on the staging server
+                ssh webadmin@stageserver 'sudo chown -R apache:${env.SITEID}-web /var/opt/httpd/${env.SITEID}docs/ && sudo chmod -R g+w /var/opt/httpd/${env.SITEID}docs/ && sudo find /var/opt/httpd/${env.SITEID}docs/ -type d -exec chmod g+s {} \\;'
+
+                #delete the temporary files on the control server
+                rm -Rf /tmp/${env.SITEID}docs/
+                # clear the Incapsula caches
+                if [[ \$( curl -sS -X POST \"http://www.example.net/incapcache.php?api_key=asdaswwGR)feasdsdda&site_id=stage&resource_url=stage-myproject.example.net\" | jq -r .debug_info.id_info) != \"incapsula cache cleared successfuly\" ]]; then exit 255; fi"""
+            }
+        }
+        stage("deploy-db-production") {
+            when {
+                allOf { 
+                    environment ignoreCase: true, name: "DEPLOY_TO", value: "production"; 
+                    environment ignoreCase: true, name: "DEPLOY_DB", value: "true"; 
+                }
+            }
+            steps {
+                script {
+                    def myexcludes = env.EXCLUDE.split(',').toList()
+                    MYFLAGS = "-Q -K -c -e --default-character-set=utf8 "
+                    if (env.NOFLAGS == "0") {
+                        myexcludes.each {
+                            MYFLAGS = "${MYFLAGS} --ignore-table=${env.DBNAME}_stage.${it}"
+                        }
+                    }
+                }
+                sh """cd ${WORKSPACE}
+                # pull a backup of the current staging database (may exclude some tables)
+                mysqldump -h ${env.DBSERVER} -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_stage ${MYFLAGS} > ${env.DBNAME}_stage.sql
+        #Searching and replace for the URL to change from the stage sever to the prod server
+                sed -i s/stage-myproject.example.net/www.myproject.com/g ${env.DBNAME}_stage.sql
+
+                # create a backup copy of the current production database (full backup)
+                mysqldump -h ${env.DBSERVER} -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_prod > ${env.DBNAME}_prod_bak.sql
+                # upload the staging database dump to the production database
+                mysql -h ${env.DBSERVER} -u ${env.DBUSER} --password='${env.DBPASS}' ${env.DBNAME}_prod < ${WORKSPACE}/${env.DBNAME}_stage.sql
+                rm -f ${WORKSPACE}/${env.DBNAME}_stage.sql"""
+        }
+        }
+        stage("deploy-production") {
+            when {
+                environment ignoreCase: true, name: "DEPLOY_TO", value: "production"
+            }
+            steps {
+                // copy files from staging to control server
+                sh """rsync --exclude=.svn --exclude=.git -rav -e ssh webadmin@stageserver:/var/opt/httpd/${env.SITEID}docs/ /tmp/${env.SITEID}docs/
+
+                # prepare the production server to receive files by changing the owner
+                ssh webadmin@prodserver1 'sudo chown -R webadmin:webadmin /var/opt/httpd/${env.SITEID}docs'
+                ssh webadmin@prodserver2 'sudo chown -R webadmin:webadmin /var/opt/httpd/${env.SITEID}docs'
+                # copy files from control server to production
+                rsync --exclude=.svn --exclude=.git -rav -e ssh --delete /tmp/${env.SITEID}docs/ webadmin@prodserver1:/var/opt/httpd/${env.SITEID}docs/
+                rsync --exclude=.svn --exclude=.git -rav -e ssh --delete /tmp/${env.SITEID}docs/ webadmin@prodserver2:/var/opt/httpd/${env.SITEID}docs/
+                # fix the owner/permissions on the production server
+                ssh webadmin@prodserver1 'sudo chown -R apache:${env.SITEID}-web /var/opt/httpd/${env.SITEID}docs/'
+                ssh webadmin@prodserver2 'sudo chown -R apache:${env.SITEID}-web /var/opt/httpd/${env.SITEID}docs/'
+                ssh webadmin@prodserver1 'sudo chmod -R g+w /var/opt/httpd/${env.SITEID}docs/'
+                ssh webadmin@prodserver2 'sudo chmod -R g+w /var/opt/httpd/${env.SITEID}docs/'
+                ssh webadmin@prodserver1 'sudo find /var/opt/httpd/${env.SITEID}docs/ -type d -exec chmod g+s {} \\;'
+                ssh webadmin@prodserver2 'sudo find /var/opt/httpd/${env.SITEID}docs/ -type d -exec chmod g+s {} \\;'
+
+                # delete the temporary files on the control server
+                rm -Rf /tmp/${env.SITEID}docs/
+                # clear the Incapsula caches
+                if [[ \$( curl -sS -X POST \"http://www.example.net/incapcache.php?api_key=asdaswwGR)feasdsdda&site_id=088&resource_url=www.myproject.com\" | jq -r .debug_info.id_info) != \"incapsula cache cleared successfuly\" ]]; then exit 255; fi"""
+            }
+        }
+    }
+}
+---------------------------------Model---------------------------------------------------------------------------
+Get rid of your parameters, they are not needed (would stop you from automation).
+Have a manual input in the deploy to prod stage
+pipeline {
+    agent any
+    stages {
+        stage('Deploy to prod') {
+            input {
+                message "Should we continue?"
+                ok "Yes, we should."
+            }
+            steps {
+                echo "Deploying."
+            }
+        }
+    }
+}
+This should be multibranch pipeline project in Jenkins (since you want to it on all branches)
+if you want to use different stages for different branches do use when
+pipeline {
+    agent any
+    stages {
+        stage('Example Build') {
+            steps {
+                echo 'Hello World'
+            }
+        }
+        stage('Example Deploy') {
+            when {
+                branch 'production'
+            }
+            steps {
+                echo 'Deploying'
+            }
+        }
+    }
+}
+As for suggestions - I would say you need to match your git flow with your CI/CD flow. What's the lifecycle of given git branch type? What's the result of the given stage? Do you want to execute the stages for all the branches and deploy to prod just for one branch?
+pipeline 
+{
+        stages 
+        {
+               stage('Build')
+               {
+                     steps
+                     {
+                        echo 'building the codes from the git'
+                      }
+                }
+                stage('developer-branch-stuff')
+                {
+                   when
+                   {
+                       branch 'developer'
+                   }
+                   steps
+                   {
+                      echo 'run this stage - only if the branch = developer branch'
+                   }
+                }
+        stage('Deliver for development') 
+        {
+            when 
+            {
+                branch 'developer'
+            }
+            steps 
+            {
+                sh 'your_filename_along_with_your_filepath'
+                input message: 'shall we deploy it? (Click "Proceed" to continue)'
+            }
+        }
+        stage('Deploy for production') 
+        {
+            when
+            {
+                branch 'developer'
+            }
+            steps
+            {
+                sh 'your_filename_along_with_your_filepath'
+                input message: 'shall we proceed to production? (Click "Proceed" to continue)'
+            }
+        }
+    }
+}
+------------------------------- refdoc---------------------------
+https://stackoverflow.com/questions/55976915/how-to-make-my-project-deploy-automatically-from-dev-to-staging-and-manually-to
