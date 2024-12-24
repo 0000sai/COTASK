@@ -1,0 +1,36 @@
+stages:
+  - build
+
+image: docker:24.0.5
+services:
+  - name: docker:24.0.5-dind
+    alias: dind
+
+variables:
+  WEB_REGISTRY: $CI_REGISTRY_IMAGE/ui
+  API_REGISTRY: $CI_REGISTRY_IMAGE/api
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+
+ui:build:push:registry:
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd react-crud-web
+    - docker pull $WEB_REGISTRY:latest || true
+    - docker build --cache-from $WEB_REGISTRY:latest --tag $WEB_REGISTRY:$CI_COMMIT_SHA --tag $WEB_REGISTRY:latest -f Dockerfile.prod .
+    - docker push $WEB_REGISTRY:$CI_COMMIT_SHA
+    - docker push $WEB_REGISTRY:latest
+
+
+api:build:push:registry:
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd tutorial-service
+    - docker pull $API_REGISTRY:latest || true
+    - docker build --cache-from $API_REGISTRY:latest --tag $API_REGISTRY:$CI_COMMIT_SHA --tag $API_REGISTRY:latest -f Dockerfile.prod .
+    - docker push $API_REGISTRY:$CI_COMMIT_SHA
+    - docker push $API_REGISTRY:latest

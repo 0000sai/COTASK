@@ -1,0 +1,12 @@
+
+
+# This is a template that would be extended
+.base:cypress:
+  image: cypress/browsers:latest
+  before_script:
+    - cd rudimentary1.0
+    - npm run cy:install
+  after_script:
+    - ls -la
+    - pwd
+    - echo "Testing is complete!"

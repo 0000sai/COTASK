@@ -1,0 +1,4 @@
+#Uncomment the below to allow changing of the default port of 3000
+# PORT=8081
+
+REACT_APP_API_ADDRESS=http://localhost:8080/api

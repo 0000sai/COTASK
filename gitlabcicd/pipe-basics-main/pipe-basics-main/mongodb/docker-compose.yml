@@ -1,0 +1,14 @@
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: "mongodb"
+    restart: always
+    ports:
+      - "27017:27017"
+    networks:
+     - backend-network
+
+networks:
+  backend-network:
+    name: cenidea-backend-network
+    driver: bridge

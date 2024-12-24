@@ -1,0 +1,20 @@
+{
+  "name": "mars1.0",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "cy:install": "npm install -f",
+    "cy:debug": "cypress open",
+    "cy:run:chrome": "cypress run --browser=chrome",
+    "cy:run:edge": "cypress run --browser=edge",
+    "cy:run:firefox": "cypress run --browser=firefox"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "cypress": "^13.15.2",
+    "typescript": "^5.6.3"
+  }
+}

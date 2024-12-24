@@ -1,0 +1,41 @@
+stages:
+  - build
+  - accessibility
+
+include:
+  - local: "common-pipes.yml"
+
+# Job one that extended the template
+build:app:
+  stage: build
+  extends: .base:cypress
+  script:
+    - npm run cy:run:edge
+
+# Job two that extended the template
+accessibility:firefox:
+  stage: accessibility
+  extends: .base:cypress
+  script:
+    - npm run cy:run:firefox
+  artifacts:
+    when: always
+    expire_in: "30 days"
+    paths:
+      - "rudimentary1.0/cypress/videos/"
+      - "rudimentary1.0/cypress/screenshots/"
+  only:
+    - main
+
+# Job three that extended the template
+accessibility:chrome:
+  stage: accessibility
+  extends: .base:cypress
+  script:
+    - npm run cy:run:chrome
+  artifacts:
+    when: always
+    expire_in: "30 days"
+    paths:
+      - "rudimentary1.0/cypress/videos/"
+      - "rudimentary1.0/cypress/screenshots/"

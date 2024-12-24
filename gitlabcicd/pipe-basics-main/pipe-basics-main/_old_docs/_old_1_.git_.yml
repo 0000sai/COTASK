@@ -1,0 +1,118 @@
+stages:
+  - complete
+  - artifacts
+  - access_artifacts
+  - hello
+  - build
+  - test
+  - deploy
+
+variables:
+  COY_NAME: "CEN IDEA LTD"
+image: maven:3.9.9-eclipse-temurin-11
+
+
+
+
+
+complete_job:
+  stage: complete
+  variables:
+    COY_NAME: "CEN IDEA LTD"
+    COY_ID: 168466
+  artifacts:
+    untracked: false
+    when: on_success
+    access: all
+    expire_in: "30 days"
+    paths:
+      - build_output/
+  image: node:23-alpine3.19
+  before_script:
+    - echo "Running before_script stage"
+    - echo "Running before_script stage"
+  script:
+    - echo "Running script stage"
+    - mkdir build_output
+    - echo "Build Completed!" > build_output/output.txt
+  after_script:
+    - echo "Running after_script stage"
+    - echo "Running after_script stage"
+  when: manual
+  only:
+    - main
+    - prot
+  tags:
+    - gitlab-org-docker
+  allow_failure: false
+  # environment:
+  #   name: production
+  #   url: https://example.com
+
+
+
+
+artifacts:artifacts:
+  stage: artifacts
+  script:
+    - echo "Creating artifacts"
+    - mkdir build_output
+    - echo "Build Completed!" > build_output/output.txt
+  artifacts:
+    paths:
+      - build_output/
+    untracked: false
+    when: on_success
+    access: all
+    expire_in: "5 days"
+
+
+access_artifacts:access_artifacts:
+  stage: access_artifacts
+  script:
+    - echo "Accessing artifacts"
+    - cat build_output/output.txt
+    - echo "Test Passed!"
+  dependencies:
+    - "artifacts:artifacts"
+
+
+hello:hello:
+  stage: hello
+  variables:
+    COY_ID: "12345678910"
+    # COY_NAME: "CEN IDEA"
+  script:
+    - echo $CI_COMMIT_AUTHOR
+    - echo $CI_JOB_STATUS
+    - echo $COY_NAME
+    - echo $COY_ID
+    - echo $DB_PASSWORD
+    - echo $SSH_PRIVATE_KEY
+    - echo $DH_REGISTRY_USER
+
+
+build:build_job:
+  stage: build
+  script: # Anything that works in the shell script would run here
+    - echo "Building Hello World Project ..."
+    - sleep 5
+    - echo "Building Hello World Project ... done"
+    - echo $COY_NAME
+    # - echo $COY_ID
+    - echo $DB_PASSWORD
+
+test:test_job:
+  stage: test
+  script: # Anything that works in the shell script would run here
+    - echo "Testing Hello World Project ..."
+    - sleep 5
+    - echo "Testing Hello World Project ... done"
+
+
+deploy:deploy_job:
+  stage: deploy
+  script: # Anything that works in the shell script would run here
+    - echo "Deploying Hello World Project ..."
+    - sleep 5
+    - echo "Deploying Hello World Project ... done"

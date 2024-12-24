@@ -1,0 +1,16 @@
+FROM node:21-alpine3.20 AS api
+
+WORKDIR /microservice
+
+ENV PATH=/microservice/node_modules/.bin:$PATH
+ENV PORT=8080
+
+COPY package.json /microservice/
+COPY app /microservice/app/
+COPY server.js /microservice/
+
+RUN npm install -f
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "node server.js ${MONGODB_URI}"]
