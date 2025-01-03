@@ -1,0 +1,139 @@
+image: alpine
+
+variables:
+  IMAGE_NAME: "nginx"
+  IMAGE_DEFAULT_TAG: "stable-alpine"
+  CI_EXECUTION_DIR: "/home/$EC2_USER/docker_dir"
+  ECR_REPOSITORY_URI: "$AWS_ACCOUNT.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+
+stages:
+  - check_ecr_default_image
+  - docker_pull
+  - security_check
+  - docker_push
+  - build_new_image
+  - check_and_push
+  - deploy
+  - blue-green
+
+# check in case default image exists in ECR repo
+check_ecr_default_image:
+  stage: check_ecr_default_image
+  before_script:
+    # Establish SSH connection to the EC2 instance
+    - &establish_ssh_connection >-
+        apk add openssh-client;
+        eval "$(ssh-agent -s)";
+        mkdir -p ~/.ssh;
+        chmod 700 ~/.ssh;
+        ssh-keyscan $EC2_HOST >> ~/.ssh/known_hosts;
+        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        pwd && touch ci_variables.env && chmod 755 ci_variables.env &&
+        if ! aws ecr describe-images --repository-name $IMAGE_NAME --image-ids imageTag=stable > /dev/null 2>&1; then
+          echo 'ECR_IMAGE_EXISTS=false' > ci_variables.env;
+        else
+          echo 'ECR_IMAGE_EXISTS=true' > ci_variables.env;
+        fi"
+    - scp -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST:ci_variables.env .
+    - cat ci_variables.env
+  artifacts:
+    paths:
+      - ci_variables.env
+    expire_in: 1 hour
+
+# pull default image from Docker hub
+docker_pull:
+  stage: docker_pull
+  before_script:
+    -  if grep -q 'ECR_IMAGE_EXISTS=true' ci_variables.env; then exit 0; fi
+    - *establish_ssh_connection
+  script:
+    - ssh  $EC2_USER@$EC2_HOST "
+        docker pull $IMAGE_NAME:$IMAGE_DEFAULT_TAG"
+
+# security stage, perform any security checks the image with Trivy tool
+security_check:
+  stage: security_check
+  before_script:
+    -  if grep -q 'ECR_IMAGE_EXISTS=true' ci_variables.env; then exit 0; fi
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        trivy image $IMAGE_NAME:$IMAGE_DEFAULT_TAG &&
+        trivy --severity CRITICAL --exit-code 1 $IMAGE_NAME:$IMAGE_DEFAULT_TAG"
+  allow_failure: true
+
+# push the default image to ECR repo
+docker_push:
+  stage: docker_push
+  before_script:
+    -  if grep -q 'ECR_IMAGE_EXISTS=true' ci_variables.env; then exit 0; fi
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        docker tag $IMAGE_NAME:$IMAGE_DEFAULT_TAG $ECR_REPOSITORY_URI/$IMAGE_NAME:$IMAGE_DEFAULT_TAG &&
+        aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI &&
+        docker push $ECR_REPOSITORY_URI/$IMAGE_NAME:$IMAGE_DEFAULT_TAG &&
+        docker image prune -a -f"
+
+# Take the default image from ECR repo and build new image
+build_new_image:
+  stage: build_new_image
+  before_script:
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "mkdir -p $CI_EXECUTION_DIR/"
+    - scp Dockerfile index.html $EC2_USER@$EC2_HOST:$CI_EXECUTION_DIR/
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        pwd && docker pull $ECR_REPOSITORY_URI/$IMAGE_NAME:$IMAGE_DEFAULT_TAG &&
+        cd $CI_EXECUTION_DIR/ && 
+        sed -i 's|\${ECR_REPOSITORY_URI}|$ECR_REPOSITORY_URI|g' Dockerfile &&
+        sed -i 's|\${IMAGE_NAME}|$IMAGE_NAME|g' Dockerfile &&
+        sed -i 's|\${IMAGE_DEFAULT_TAG}|$IMAGE_DEFAULT_TAG|g' Dockerfile &&
+        docker build -f Dockerfile -t $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID . &&
+        cd .. && rm -rf $CI_EXECUTION_DIR"
+
+# scan the created image and push to the ECR repo
+check_and_push:
+  stage: check_and_push
+  before_script:
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        trivy image $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID &&
+        trivy --severity CRITICAL --exit-code 1 $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID &&
+        docker push $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID"
+  allow_failure: true
+
+# deploy docker container from the new image
+deploy:
+  stage: deploy
+  before_script:
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        docker ps -a -q --filter name="nginx-app2" | xargs -r docker stop | xargs -r docker rm &&
+        docker ps -a -q --filter name="nginx-app1" && 
+        docker run --name nginx-app2 -d -p 8080:80 $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID || 
+        docker run --name nginx-app1 -d -p 80:80 $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID"
+
+# blue-green stage
+blue-green:
+  stage: blue-green
+  when: manual
+  before_script:
+    - *establish_ssh_connection
+  script:
+    - ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "
+        sudo lsof -i -P -n | grep LISTEN | grep 80  && echo "port 80 is busy" || echo "port 80 is not busy" &&
+        docker ps -a -q --filter name="nginx-app1" | xargs -r docker stop | xargs -r docker rm &&
+        docker run --name "nginx-app1" -d -p 80:80 $ECR_REPOSITORY_URI/$IMAGE_NAME:$CI_PIPELINE_IID &&
+        docker ps -a -q --filter name="nginx-app2" | xargs -r docker stop | xargs -r docker rm &&
+        docker image prune -a -f"
+
+
+after_script:
+  # Close SSH connection to the EC2 instance
+  - ssh-agent -k
