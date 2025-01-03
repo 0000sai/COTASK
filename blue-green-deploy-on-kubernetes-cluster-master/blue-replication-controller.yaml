@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: blue
+spec:
+  replicas: 1
+  selector:
+    app: blue
+  template:
+    metadata:
+      name: blue
+      labels:
+        app: blue
+    spec:
+      containers:
+      - name: blue
+        image: vrmohanbabu/blue_green_kubernetes
+        ports:
+        - containerPort: 80
