@@ -54,4 +54,8 @@ In this project, we will develop a CI/CD pipeline for micro services application
 1. Run: `create_kubernetes_cluster.sh`
 2. Run Jenkins Pipeline.
 
+https://github.com/vrmohanbabu/blue-green-deploy-on-kubernetes-cluster/tree/master
+
+
+
 
