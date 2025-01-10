@@ -1,5 +1,7 @@
 # CI/CD com GitHub Actions no Azure Web App (Dev, QA e Prod)
 
+https://medium.com/@lorenzouriel/ci-cd-with-github-actions-on-azure-web-app-dev-qa-and-prod-241c1cadd9b6
+
 Este repositório contém a configuração de pipelines CI/CD para gerenciar os ambientes de **Desenvolvimento (Dev)**, **Qualidade (QA)** e **Produção (Prod)** no Azure Web Apps, utilizando arquivos YAML.
 
 ## Ambientes e Pipelines
