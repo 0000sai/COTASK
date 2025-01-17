@@ -1,4 +1,5 @@
 # Docker-Compose Examples
+https://github.com/burtonr/Docker-Compose-Examples
 
 There are different examples of processing variables when using Docker-Compose in this repository.
 
@@ -51,3 +52,4 @@ The value in the compose file will override the value in the file no matter what
 
 
 Huge thanks out to the team at Runnable for putting together a [blog post](https://runnable.com/docker/advanced-docker-compose-configuration) that inspired these examples.
+
