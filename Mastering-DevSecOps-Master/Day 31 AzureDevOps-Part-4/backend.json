@@ -1,0 +1,7 @@
+{
+    "access_key": "ACCESSKEYHERE",
+    "secret_key": "SECRETEKEYHERE",
+    "bucket": "sais3bucket236",
+    "key": "sais3bucket236.tfstate",
+    "region": "us-east-1"
+}

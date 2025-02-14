@@ -1,0 +1,181 @@
+trigger:
+  branches:
+    include:
+      - master
+    exclude:
+      - releases/old*
+      - feature/*-working
+# resources:
+#   pipelines:
+#     - pipeline: running-secondary-pipeline
+#       source: variable-group-testing
+#       project: variable-group-testing
+#       trigger:
+#         branches:
+#           include:
+#             - main
+#For using single agent for all stages use below code.
+pool:
+  name: LinuxAgentPool
+  demands:
+    - Terraform -equals Yes
+variables:
+  - group: AWS_ACCESS_GROUP
+  - name: PACKERBUILD
+    value: "NO"
+  - name: TERRAFORM_APPLY
+    value: "NO"
+  - name: ANSIBLEJOB
+    value: "NO"
+  - name: TERRAFORM_DESTROY
+    value: "YES"
+  #- DESTROY: 'NO' #- Without Variable Group.
+  # PACKERBUILD: 'YES' - Without Variable Group.
+  # We can pass variables between stages by exporting then as outputs. Refernce below
+  #https://www.reddit.com/r/azuredevops/comments/qlroi7/pass_variables_between_stages/
+
+stages:
+  - stage: "Packer_Validate_Build"
+    displayName: "Packer Validate & Build"
+    condition: eq(variables.PACKERBUILD, 'YES')
+    jobs:
+      - job: "Download_Secure_Files"
+        displayName: "Download_Secure_Files"
+        steps:
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "packer-vars.json"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/myagent/_work/2/s"
+          - script: pwd && ls -al
+            displayName: "Files_Check"
+
+          # Step to install the Amazon plugin
+          - script: |
+              echo "Installing Packer Amazon plugin..."
+              packer plugins install github.com/hashicorp/amazon
+              echo "Verifying installed plugins..."
+              packer plugins installed
+            displayName: "Install Packer Amazon Plugin"
+
+          - script: packer validate -var-file packer-vars.json packer.json
+            displayName: "Packer Validate"
+
+          - script: packer build -var-file packer-vars.json packer.json
+            displayName: "Packer Build"
+
+  - stage: "Download_Secure_Files_and_Terraform_Validate"
+    displayName: "Terraform Validate & Download Secure Files"
+    condition: and(in(dependencies.Packer_Validate_Build.result, 'Succeeded', 'Skipped'), eq(variables.TERRAFORM_APPLY, 'YES'))
+    jobs:
+      - job: "Download_Secure_Files"
+        displayName: "Download_Secure_Files"
+        steps:
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "backend.json"
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "access.auto.tfvars"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/myagent/_work/2/s"
+          - script: pwd && ls -al && echo $COMMIT_MESG
+            displayName: "Files_Check"
+          - script: terraform init -backend-config=backend.json
+            displayName: "Terraform_Initialize"
+          - script: terraform validate
+            displayName: "Terraform_Validate"
+
+  - stage: "Download_Secure_Files_and_Terraform_Plan_and_Apply"
+    displayName: "Terraform Plan & Apply & Download Secure Files"
+    condition: and(in(dependencies.Packer_Validate_Build.result, 'Succeeded', 'Skipped'), eq(variables.TERRAFORM_DESTROY, 'NO'), eq(variables.TERRAFORM_APPLY, 'YES'))
+    jobs:
+      - job: "Download_Secure_Files_And_Terraform_Apply"
+        displayName: "Download_Secure_Files_And_Terraform_Apply"
+        steps:
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "backend.json"
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "access.auto.tfvars"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/myagent/_work/2/s"
+          - script: pwd && ls -al
+            displayName: "Files_Check"
+          - script: terraform init -backend-config=backend.json
+            displayName: "Terraform_Initialize"
+          - script: terraform plan
+            displayName: "Terraform_Plan"
+          - script: terraform apply -var="aws_access_key=$(aws-access-key)" -var="aws_secret_key=$(aws-secret-key)" --auto-approve
+            displayName: "Terraform_Apply"
+          - script: pwd && ls -al && cat invfile
+            displayName: "Files_Check"
+
+  #Make sure ansible is installed on the ADO Agent and disable host_key_checking.
+  - stage: "Run_Ansible_Setup"
+    displayName: "Run Ansible Setup Module"
+    condition: and(in(dependencies.Download_Secure_Files_and_Terraform_Plan_and_Apply.result, 'Succeeded', 'Skipped'), eq(variables.TERRAFORM_DESTROY, 'NO'), eq(variables.ANSIBLEJOB, 'YES'))
+    jobs:
+      - job: "Download_Secure_Files"
+        displayName: "Download_Secure_Files"
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "SecOps-Key.pem"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/myagent/_work/2/s"
+          - script: pwd && ls -al && chmod 400 SecOps-Key.pem
+            displayName: "Files_Check"
+          - script: ansible -i invfile all -m ping -u ubuntu
+            displayName: "Ansible_Setup"
+            timeoutInMinutes: 1
+          - script: ansible-playbook -i invfile docker-swarm.yml -u ubuntu --syntax-check
+            displayName: "Ansible_Docker_Swarm_Syntax_Check"
+            timeoutInMinutes: 1
+          - script: ansible-playbook -i invfile docker-swarm.yml -u ubuntu --check
+            displayName: "Ansible_Docker_Swarm_Dry_Run"
+            timeoutInMinutes: 2
+          - script: ansible-playbook -i invfile docker-swarm.yml -u ubuntu -vv
+            displayName: "Ansible_Docker_Swarm_Apply"
+            timeoutInMinutes: 5
+
+  - stage: "Download_Secure_Files_and_Terraform_Destroy_Variable"
+    displayName: "Terraform Destroy & Download Secure Files"
+    condition: and(eq(variables.TERRAFORM_DESTROY, 'YES'), eq(variables.TERRAFORM_APPLY, 'NO'), eq(variables.ANSIBLEJOB, 'NO'))
+    jobs:
+      - job: "Terraform_Destroy"
+        displayName: "Terraform_Destroy"
+        timeoutInMinutes: 5
+        steps:
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "backend.json"
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "access.auto.tfvars"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/myagent/_work/2/s"
+          - script: pwd && ls -al
+            displayName: "Files_Check"
+          - script: terraform init -backend-config=backend.json
+            displayName: "Terraform_Initialize"
+          - script: terraform destroy -var="aws_access_key=$(aws-access-key)" -var="aws_secret_key=$(aws-secret-key)" --auto-approve
+            displayName: "Terraform_Destroy"
