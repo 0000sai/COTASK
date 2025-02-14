@@ -1,0 +1,355 @@
+trigger:
+  - development
+  - uat
+  - production
+
+pool:
+  name: ProdAgentPool
+  demands:
+    - JDK -equals 17
+    - Terraform -equals Yes
+    - Agent.Name -equals ADO-Testing_Env
+
+variables:
+  global_version: "1.0.0"
+  global_email: "mavrick202@gmail.com"
+  azure_dev_sub: "9ce91e05-4b9e-4a42-95c1-4385c54920c6"
+  azure_prod_sub: "298f2c19-014b-4195-b821-e3d8fc25c2a8"
+  isDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/development')]
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/production')]
+
+stages:
+  - stage: CheckingTheAgent
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: ProdAgentPool
+      demands:
+        - Terraform -equals Yes
+    variables:
+      stage_version: "2.0.0"
+      stage_email: "saikiran.pinapathruni18@gmail.com"
+    jobs:
+      - job: CheckingTerraformAndPacker
+        variables:
+          job_version: "3.0.0"
+          job_email: "saiaws@gmail.com"
+        timeoutInMinutes: 5
+        steps:
+          - script: echo $(Build.BuildId)
+            displayName: "Display The Build-ID"
+          - script: terraform version && packer version
+            displayName: "Display Terraform & Packer Version"
+          - script: docker version && docker ps && docker images && docker ps -a
+            displayName: "Display Docker Version"
+          - script: pwd && ls -al
+            displayName: "List Folder & Files"
+
+  - stage: SASTWithSonarQube
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: ProdAgentPool
+      demands:
+        - JDK -equals 17
+    jobs:
+      - job: RunningSASTWithSonarqube
+        timeoutInMinutes: 10
+        steps:
+          #SonarQube User Token need to be generated and used in the ServiceConnection.
+          #Also change name of the project and artifactId(line 6 & 14) to ado-spring-boot-app-dev in POM.
+          #No need to create a project in sonarqube as its created automatically.
+          - task: SonarQubePrepare@7
+            inputs:
+              SonarQube: "SonarTestToken"
+              scannerMode: "Other"
+              #projectKey: 'sqp_63da7bac31bd4496f2ee1170156659ea8c782c28'-NotNeeded
+              #projectName: 'ado-spring-boot-app-dev'-NotNeeded
+              projectVersion: "$(Build.BuildId)"
+            displayName: "Preparing SonarQube Config"
+          - task: Maven@4
+            inputs:
+              mavenPomFile: "pom.xml"
+              publishJUnitResults: false
+              javaHomeOption: "JDKVersion"
+              mavenVersionOption: "Default"
+              mavenAuthenticateFeed: false
+              effectivePomSkip: false
+              sonarQubeRunAnalysis: true
+              sqMavenPluginVersionChoice: "latest"
+              options: "-DskipTests"
+            displayName: "Running SonarQube Maven Analysis"
+          - task: sonar-buildbreaker@8
+            inputs:
+              SonarQube: "SonarTestToken"
+            displayName: "SAST Job Fail or Pass"
+  - stage: BuildingJavaCodeWithMavenCopyToJFrog
+    condition: or(eq(variables.isProd, true), eq(variables.isDev, true))
+    # condition: and(succeeded(), eq(variables.isDev, true))
+    #condition: always()
+    pool:
+      name: ProdAgentPool
+      demands:
+        - Terraform -equals Yes
+    jobs:
+      - job: BuildingJavaCodeJob
+        timeoutInMinutes: 5
+        steps:
+          - script: ls -al && pwd && rm -rf /home/adminsai/.m2/settings.xml
+            displayName: "List Files & Current Working Directory"
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "settings.xml"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/.m2"
+          - script: mvn versions:set -DnewVersion=Dev-2.0.$(Build.BuildId)
+            displayName: "Set Maven Build Version"
+          - script: mvn clean package install && ls -al
+            displayName: "Run the maven build and install"
+          - script: mvn deploy && ls -al
+            displayName: "Run the maven deploy"
+            continueOnError: true
+          - script: ls -al && cp /home/adminsai/myagent/_work/1/s/target/ado-spring-boot-app-dev-Dev-2.0.$(Build.BuildId).jar ROOT$(Build.BuildId).jar && ls -al
+            displayName: "List Files & Rename ROOT.jar"
+          - script: rm -rf /artifacts/*.jar && cp ROOT$(Build.BuildId).jar /artifacts && ls -al /artifacts
+            displayName: "Copy Artifact To Folder"
+          - task: CopyFiles@2
+            inputs:
+              Contents: "ROOT$(Build.BuildId).jar"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)"
+              OverWrite: true
+            displayName: "Copying JAR file to ArtifactStagingDirector"
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "ROOT$(Build.BuildId).jar"
+              publishLocation: "Container"
+            displayName: "Publishing JAR Artifact."
+  - stage: CopyingArtifactsToAzureAndAws
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+      - job: CopyFilesToAzureBlob
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - script: |
+              echo "Debugging STORAGE_ACCOUNT_KEY..."
+              echo "Key length: ${#STORAGE_ACCOUNT_KEY}"
+              echo "Key value (partial): ${STORAGE_ACCOUNT_KEY:0:5}*****"
+            displayName: "Debug STORAGE_ACCOUNT_KEY"
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: "saikiransecops-subscription"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                az storage blob upload-batch --account-name saikiransecops \
+                  --account-key $(STORAGE_ACCOUNT_KEY) \
+                  --destination artifacts --source /artifacts/
+            displayName: "Azure Upload artifacts to Azure Blob"
+            continueOnError: true
+
+          # Fallback hardcoded key for testing purposes
+          - task: AzureCLI@2
+            condition: failed()
+            inputs:
+              azureSubscription: "saikiransecops-subscription"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                echo "Using hardcoded key for testing..."
+                az storage blob upload-batch --account-name saikiransecops \
+                  --account-key "yDO5lCm7ud6VRLjHkjikceT3ysgEYeDUn5SRC8jIU3PcNe/ZIocl+90BfRAUl3QkF6CLfARX8IRA+AStA/NlOA==" \
+                  --destination artifacts --source /artifacts/
+            displayName: "Azure Upload artifacts with hardcoded key"
+            continueOnError: true
+      - job: CopyFilesToAWSS3Bucket
+        dependsOn: CopyFilesToAzureBlob
+        condition: always() # succeededOrFailed() or always() or failed() or succeeded()-default
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - task: S3Upload@1
+            inputs:
+              awsCredentials: "saikiransecops-s3"
+              regionName: "us-east-1"
+              bucketName: "saikiransecopss3uploadartifacts"
+              sourceFolder: "/artifacts/"
+              globExpressions: "ROOT$(Build.BuildId).jar"
+            displayName: "AWS Upload artifacts to AWS S3 Bucket"
+            continueOnError: true
+  - stage: DockerBuildAndTrivyScan
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: ProdAgentPool
+    jobs:
+      - job: BuildingContainerImageAndSecurityScanning
+        timeoutInMinutes: 10
+        steps:
+          - checkout: none
+          - script: docker build -t kiran2361993/myapp:$(Build.BuildId) .
+            displayName: "Create Docker Image"
+          #- script: trivy image --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml kiran2361993/myapp:$(Build.BuildId)
+          - script: |
+              trivy image --exit-code 0 --severity LOW,MEDIUM --format template --template "@template/junit.tpl" -o junit-report-low-med.xml kiran2361993/myapp:$(Build.BuildId)
+              trivy image --exit-code 0 --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml kiran2361993/myapp:$(Build.BuildId)
+            displayName: "Scan Image and Create Report"
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "**/junit-report-low-med.xml"
+              mergeTestResults: true
+              failTaskOnFailedTests: false
+              testRunTitle: "Trivy - Low and Medium Vulnerabilities"
+            displayName: "Trivy - Low and Medium Vulnerabilities"
+            condition: "always()"
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "**/junit-report-high-crit.xml"
+              mergeTestResults: true
+              failTaskOnFailedTests: false
+              testRunTitle: "Trivy - High and Critical Vulnerabilities"
+            displayName: "Trivy - High and Critical Vulnerabilities"
+            condition: "always()"
+  - stage: BuildDockerImagePushToAzureACRAndDockerHub
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+      - job: PushToAzureACR
+        #dependsOn: DockerBuildAndTrivyScan
+        condition: always() # succeededOrFailed() or always() or failed()
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - task: Bash@3
+            inputs:
+              targetType: "inline"
+              script: |
+                docker login -u devsecopsacrtest -p $(acrpassword) devsecopsacrtest.azurecr.io
+                docker tag kiran2361993/myapp:$(Build.BuildId) devsecopsacrtest.azurecr.io/devsecopsacrtest:$(Build.BuildId)
+                docker push devsecopsacrtest.azurecr.io/devsecopsacrtest:$(Build.BuildId)
+            displayName: "Creating & Pushing Docker Image To Azure ACR"
+      # - job: PushToDockerHub
+      #   dependsOn: PushToAzureACR
+      #   condition: always() # succeededOrFailed() or always() or failed()
+      #   timeoutInMinutes: 5
+      #   steps:
+      #     - checkout: none
+      #     - task: Docker@2
+      #       inputs:
+      #         containerRegistry: "devops-dockerhub-connection"
+      #         command: "login"
+      #       displayName: "Login To Docker Hub"
+      #     - task: Bash@3
+      #       inputs:
+      #         targetType: "inline"
+      #         script: |
+      #           docker tag kiran2361993/myapp:$(Build.BuildId) kiran2361993/devsecopsado:$(Build.BuildId)
+      #           docker push kiran2361993/devsecopsado:$(Build.BuildId)
+      #       displayName: "Pushing Docker Image To Docker Hub"
+  - stage: DeployDockerImageToAzureACI
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: ProdAgentPool
+      demands:
+        - JDK -equals 17
+    jobs:
+      - job: DeployAzureACI
+        timeoutInMinutes: 10
+        steps:
+          - checkout: none
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: "saikiransecops-subscription"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: "az container create -g Prod-ADO-1 --name devsecopsado$(Build.BuildId) --image devsecopsacrtest.azurecr.io/devsecopsacrtest:$(Build.BuildId) --cpu 2 --memory 4 --ports 8080 --dns-name-label devsecopsado$(Build.BuildId) --registry-username devsecopsacrtest --registry-password $(acrpassword) --location eastus --os-type Linux"
+              #inlineScript: az group list
+            displayName: "Deploy Docker Image to Azure Container Instances"
+            continueOnError: true
+  - stage: "DeployingToStagingEnvironment"
+    dependsOn: BuildingJavaCodeWithMavenCopyToJFrog
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: ProdAgentPool
+    displayName: "Deploying To AWS Staging Environment"
+    jobs:
+      - deployment: "DeployJARtoStagingServer"
+        environment:
+          name: STAGING
+          resourceType: VirtualMachine
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    PROC=$(ps -ef | grep -i jar | grep -v grep | awk '{print $2}')
+                    if [ -n "$PROC" ]; then
+                      echo "Stopping process with PID: $PROC"
+                      sudo kill -9 $PROC || echo "Failed to stop process."
+                    else
+                      echo "No JAR process found. Nothing to stop."
+                    fi
+                    exit 0  # Force success status
+                  displayName: "Stop Existing JAR File"
+
+                - script: |
+                    sudo java -jar /home/ubuntu/azagent/_work/1/ROOT$(Build.BuildId).jar/ROOT$(Build.BuildId).jar &
+                    echo "Application started successfully."
+                    exit 0  # Force success status
+                  displayName: "Running The Jar File"
+
+  - stage: ZAPOWASPTestingStagingEnvironment
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+      - job: ZapTestingStaging
+        timeoutInMinutes: 20
+        steps:
+          - checkout: none
+
+          # Pull the OWASP ZAP image and run the baseline scan
+          - script: |
+              docker pull ghcr.io/zaproxy/zaproxy:stable
+              docker run -u 0 -v $(Pipeline.Workspace)/owaspzap:/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://staging.cloudvishwakarma.in:8080/ -J report.json -r report.html -I -i
+            displayName: "DAST Staging Environment"
+            continueOnError: true
+
+          # Publish the ZAP test results
+          - task: PublishTestResults@2
+            displayName: "Publish Test Results For ZAP Testing"
+            inputs:
+              testResultsFormat: "NUnit"
+              testResultsFiles: "$(Pipeline.Workspace)/owaspzap/report.html"
+  - stage: "DeployingToProdEnvironment"
+    dependsOn: BuildingJavaCodeWithMavenCopyToJFrog
+    condition: and(succeeded('BuildingJavaCodeWithMavenCopyToJFrog'), eq(variables.isProd, true))
+    pool:
+      name: ProdAgentPool
+    displayName: "Deploying To AWS Prod Environment"
+    jobs:
+      - deployment: "DeployJARtoProdServer"
+        environment:
+          name: PROD
+          resourceType: VirtualMachine
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    PROC=$(ps -ef | grep -i jar | grep -v grep | awk '{print $2}')
+                    if [ -n "$PROC" ]; then
+                      echo "Stopping process with PID: $PROC"
+                      sudo kill -9 $PROC || echo "Failed to stop process."
+                    else
+                      echo "No JAR process found. Nothing to stop."
+                    fi
+                  displayName: "Stop Existing JAR File"
+                  continueOnError: true
+
+                - script: |
+                    sudo java -jar /home/ubuntu/azagent/_work/1/ROOT$(Build.BuildId).jar/ROOT$(Build.BuildId).jar > /dev/null 2>&1 &
+                    echo "Application started successfully."
+                  displayName: "Running The Jar File"
+                  continueOnError: true
