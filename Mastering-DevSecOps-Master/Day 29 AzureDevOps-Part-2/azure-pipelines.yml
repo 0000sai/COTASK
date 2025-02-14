@@ -1,0 +1,190 @@
+trigger:
+  - development
+  - uat
+  - production
+
+pool:
+  name: LinuxAgentPool
+  demands:
+    - JDK -equals 17
+    - Terraform -equals Yes
+    - Agent.Name -equals ProdADO
+
+variables:
+  global_version: "1.0.0"
+  global_email: "saikiran@gmail.com"
+  # azure_dev_sub: "9ce91e05-4b9e-4a42-95c1-4385c54920c6"
+  # azure_prod_sub: "298f2c19-014b-4195-b821-e3d8fc25c2a8"
+  isDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/development')]
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/production')]
+
+stages:
+  - stage: CheckingTheAgent
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: LinuxAgentPool
+      demands:
+        - Terraform -equals Yes
+    variables:
+      stage_version: "2.0.0"
+      stage_email: "saikiran.pinapathruni18@gmail.com"
+    jobs:
+      - job: CheckingTerraformAndPacker
+        variables:
+          job_version: "3.0.0"
+          job_email: "saiaws@gmail.com"
+        timeoutInMinutes: 5
+        steps:
+          - script: echo $(Build.BuildId)
+            displayName: "Display The Build-ID"
+          - script: terraform version && packer version
+            displayName: "Display Terraform & Packer Version"
+          - script: docker version && docker ps && docker images && docker ps -a
+            displayName: "Display Docker Version"
+          - script: pwd && ls -al
+            displayName: "List Folder & Files"
+
+  - stage: SASTWithSonarQube
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: LinuxAgentPool
+      demands:
+        - JDK -equals 17
+    jobs:
+      - job: RunningSASTWithSonarqube
+        timeoutInMinutes: 10
+        steps:
+          #SonarQube User Token need to be generated and used in the ServiceConnection.
+          #Also change name of the project and artifactId(line 6 & 14) to ado-spring-boot-app-dev in POM.
+          #No need to create a project in sonarqube as its created automatically.
+          - task: SonarQubePrepare@7
+            inputs:
+              SonarQube: "SonarTestToken"
+              scannerMode: "Other"
+              projectVersion: "$(Build.BuildId)"
+            displayName: "Preparing SonarQube Config"
+          - task: Maven@4
+            inputs:
+              mavenPomFile: "pom.xml"
+              publishJUnitResults: false
+              javaHomeOption: "JDKVersion"
+              mavenVersionOption: "Default"
+              mavenAuthenticateFeed: false
+              effectivePomSkip: false
+              sonarQubeRunAnalysis: true
+              sqMavenPluginVersionChoice: "latest"
+              options: "-DskipTests"
+            displayName: "Running SonarQube Maven Analysis"
+          - task: sonar-buildbreaker@8
+            inputs:
+              SonarQube: "SonarTestToken"
+            displayName: "SAST Job Fail or Pass"
+  - stage: BuildingJavaCodeWithMavenCopyToJFrog
+    condition: and(succeeded(), eq(variables.isDev, true))
+    #condition: always()
+    pool:
+      name: LinuxAgentPool
+      demands:
+        - Terraform -equals Yes
+    jobs:
+      - job: BuildingJavaCodeJob
+        timeoutInMinutes: 5
+        steps:
+          - script: ls -al && pwd && rm -rf /home/adminsai/.m2/settings.xml
+            displayName: "List Files & Current Working Directory"
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: "settings.xml"
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: "$(Agent.TempDirectory)"
+              Contents: "**"
+              TargetFolder: "/home/adminsai/.m2"
+          - script: mvn versions:set -DnewVersion=Dev-2.0.$(Build.BuildId)
+            displayName: "Set Maven Build Version"
+          - script: mvn clean package install && ls -al
+            displayName: "Run the maven build and install"
+          - script: mvn deploy && ls -al
+            displayName: "Run the maven deploy"
+            continueOnError: true
+          - script: ls -al && cp /home/adminsai/myagent/_work/1/s/target/ado-spring-boot-app-dev-Dev-2.0.$(Build.BuildId).jar ROOT$(Build.BuildId).jar && ls -al
+            displayName: "List Files & Rename ROOT.jar"
+          - script: rm -rf /artifacts/*.jar && cp ROOT$(Build.BuildId).jar /artifacts && ls -al /artifacts
+            displayName: "Copy Artifact To Folder"
+          - task: CopyFiles@2
+            inputs:
+              Contents: "ROOT$(Build.BuildId).jar"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)"
+              OverWrite: true
+            displayName: "Copying JAR file to ArtifactStagingDirector"
+          - task: PublishBuildArtifacts@1
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "ROOT$(Build.BuildId).jar"
+              publishLocation: "Container"
+            displayName: "Publishing JAR Artifact."
+  - stage: CopyingArtifactsToAzureAndAws
+    condition: and(succeeded(), eq(variables.isDev, true))
+    jobs:
+      - job: CopyFilesToAzureBlob
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: "saikiransecops-subscription"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                az storage blob upload-batch --account-name saikiransecopsprod  --account-key $(STORAGE_ACCOUNT_KEY) --destination artifacts --source /artifacts/
+            displayName: "Azure Upload artifacts to Azure Blob"
+            continueOnError: true
+      - job: CopyFilesToAWSS3Bucket
+        dependsOn: CopyFilesToAzureBlob
+        condition: always() # succeededOrFailed() or always() or failed() or succeeded()-default
+        timeoutInMinutes: 5
+        steps:
+          - checkout: none
+          - task: S3Upload@1
+            inputs:
+              awsCredentials: "saikiransecops-s3"
+              regionName: "us-east-1"
+              bucketName: "saikiransecopss3uploadprodartifacts"
+              sourceFolder: "/artifacts/"
+              globExpressions: "ROOT$(Build.BuildId).jar"
+            displayName: "AWS Upload artifacts to AWS S3 Bucket"
+            continueOnError: true
+  - stage: DockerBuildAndTrivyScan
+    condition: and(succeeded(), eq(variables.isDev, true))
+    pool:
+      name: LinuxAgentPool
+    jobs:
+      - job: BuildingContainerImageAndSecurityScanning
+        timeoutInMinutes: 10
+        steps:
+          - checkout: none
+          - script: docker build -t kiran2361993/myapp:$(Build.BuildId) .
+            displayName: "Create Docker Image"
+          #- script: trivy image --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml kiran2361993/myapp:$(Build.BuildId)
+          - script: |
+              trivy image --exit-code 0 --severity LOW,MEDIUM --format template --template "@template/junit.tpl" -o junit-report-low-med.xml kiran2361993/myapp:$(Build.BuildId)
+              trivy image --exit-code 0 --severity HIGH,CRITICAL --format template --template "@template/junit.tpl" -o junit-report-high-crit.xml kiran2361993/myapp:$(Build.BuildId)
+            displayName: "Scan Image and Create Report"
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "**/junit-report-low-med.xml"
+              mergeTestResults: true
+              failTaskOnFailedTests: false
+              testRunTitle: "Trivy - Low and Medium Vulnerabilities"
+            displayName: "Trivy - Low and Medium Vulnerabilities"
+            condition: "always()"
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "**/junit-report-high-crit.xml"
+              mergeTestResults: true
+              failTaskOnFailedTests: false
+              testRunTitle: "Trivy - High and Critical Vulnerabilities"
+            displayName: "Trivy - High and Critical Vulnerabilities"
+            condition: "always()"
