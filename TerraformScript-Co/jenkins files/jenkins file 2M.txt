@@ -1,0 +1,77 @@
+pipeline {
+    agent any
+    environment {
+        // Define environment variables for SonarQube and Docker
+        SONARQUBE_URL = 'http://your-sonarqube-url'
+        SONARQUBE_CREDENTIALS = 'sonarqube-credentials-id'
+        DOCKER_REGISTRY_CREDENTIALS = 'docker-registry-credentials-id'
+        DOCKER_IMAGE = ''
+        KUBE_CONFIG = credentials('kubeconfig-credentials-id')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout code from Git repository
+                git url: 'https://your-git-repo-url.git', branch: 'main'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                // Install Node.js dependencies
+                sh "npm install"
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                // Run SonarQube analysis
+                withSonarQubeEnv('SonarQube') {
+                    sh "mvn sonar:sonar -Dsonar.projectKey=your-project-key -Dsonar.host.url=${SONARQUBE_URL} -Dsonar.login=${SONARQUBE_CREDENTIALS}"
+                }
+            }
+        }
+		
+		}
+        stage("quality gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'   / accept for the apporaval sucessfull 
+                }
+            }
+        stage('Docker Build') {
+            steps {
+                // Build Docker image
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_REGISTRY_CREDENTIALS) {
+                        def app = docker.build("${DOCKER_IMAGE}:latest")
+                        app.push()
+                    }
+                }
+            }
+        }
+        
+        stage('Update Kubernetes Manifest') {
+            steps {
+                script {
+                    // Update the image tag in Kubernetes manifest
+                    sh """
+                    sed -i 's#image: ${DOCKER_IMAGE}:.*#image: ${DOCKER_IMAGE}:latest#g' k8s/your-deployment.yaml
+                    """
+                }
+            }
+        }
+        
+        stage('Kubernetes Apply') {
+            steps {
+                // Apply the Kubernetes configuration
+                withCredentials([file(credentialsId: 'kubeconfig-credentials-id', variable: 'KUBECONFIG')]) {
+                    sh 'kubectl apply -f k8s/your-deployment.yaml'
+					
+                }
+            }
+        }
+    }
+    
+    
