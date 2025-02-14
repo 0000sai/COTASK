@@ -1,0 +1,7 @@
+trigger:
+  branches:
+    include:
+      - development
+      - uat
+      - production
+    exclude: ["master", "feature*", "README.md"]

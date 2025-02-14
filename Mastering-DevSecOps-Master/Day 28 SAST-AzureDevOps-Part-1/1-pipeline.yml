@@ -1,0 +1,21 @@
+trigger:
+  - development
+  - uat
+  - production
+
+pool:
+  name: LinuxAgentPool
+  demands:
+    - Java -equals Yes
+    - Terraform -equals Yes
+    - Agent.Name -equals ProdADO
+variables:
+  global_version: "1.0.0"
+  global_email: "pinapathruni.saikiran@gmail.com"
+  # azure_dev_sub: "1e9d13b0-73fc-43eb-b04e-4b4f5a5ea96f"
+  isDev: $[eq(variables['Build.SourceBranch'], 'refs/heads/development')]
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/production')]
+
+steps:
+  - script: docker version && packer version && terraform version && aws --version && java -version && mvn --version
+    displayName: "Testin A Newly Created Agent and rools"
