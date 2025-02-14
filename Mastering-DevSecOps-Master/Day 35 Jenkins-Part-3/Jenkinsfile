@@ -1,0 +1,153 @@
+pipeline {
+    agent none
+    environment {
+        PROJECT = "WELCOME TO Jenkins-Terraform Modules Pipeline"
+        TERRAFORM_MODULE_REPO = "https://github.com/saikiranpi/Terraform_Modules.git"
+    }
+    stages {
+        stage('For Parallel Stages') {
+            parallel {
+                stage('Deploy To Development') {
+                    agent { label 'DEV' }
+                    environment {
+                        DEV_AWS_ACCOUNT = "053490018989"
+                        DEVDEFAULTAMI = "ami-045d7ad26da8606ed"
+                        TERRAFORM_APPLY = "NO" // Set to YES to trigger apply
+                        TERRAFORM_DESTROY = "YES" // Set to YES if you want to destroyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+                    }
+                    when {
+                        branch 'development'
+                    }
+                    stages {
+                        stage('Clone Terraform Modules') {
+                            steps {
+                                sh 'pwd'
+                                sh 'rm -rf terraform-modules'
+                                sh 'ls -al'
+                                sh "git clone ${TERRAFORM_MODULE_REPO} terraform-modules"
+                                sh 'ls -al terraform-modules/development'
+                                sh 'find terraform-modules/development -name "*.tf"'
+                            }
+                        }
+                        stage('Terraform Init & Plan') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_APPLY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/development') {  // Navigate to development directory
+                                    sh 'terraform init'
+                                    sh 'terraform validate'
+                                    sh 'terraform plan -var-file=terraform.tfvars'
+                                }
+                            }
+                        }
+                        stage('Terraform Apply') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_APPLY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/development') {
+                                    sh 'terraform apply -var-file=terraform.tfvars --auto-approve'
+                                }
+                            }
+                        }
+                        stage('Terraform Destroy') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_DESTROY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/development') {
+                                    sh 'terraform init'
+                                    sh 'terraform validate'
+                                    sh 'terraform destroy -var-file=terraform.tfvars --auto-approve'
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Deploy To Production') {
+                    agent { label 'PROD' }
+                    environment {
+                        PROD_AWS_ACCOUNT = "009412611595"
+                        PRODEFAULTAMI = "ami-0f45852828028bd50"
+                        TERRAFORM_APPLY = "YES" // Set to YES to trigger apply
+                        TERRAFORM_DESTROY = "NO" // Set to YES if you want to destroy
+                    }
+                    when {
+                        branch 'production'
+                    }
+                    stages {
+                        stage('Clone Terraform Modules') {
+                            steps {
+                                sh 'pwd'
+                                sh 'ls -al'
+                                sh "git clone ${TERRAFORM_MODULE_REPO} terraform-modules"
+                                sh 'ls -al terraform-modules/production'
+                                sh 'find terraform-modules/production -name "*.tf"'
+                            }
+                        }
+                        stage('Terraform Init & Plan') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_APPLY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/production') {  // Navigate to production directory
+                                    sh 'terraform init'
+                                    sh 'terraform validate'
+                                    sh 'terraform plan -var-file=terraform.tfvars'
+                                }
+                            }
+                        }
+                        stage('Terraform Apply') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_APPLY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/production') {
+                                    sh 'terraform apply -var-file=terraform.tfvars --auto-approve'
+                                }
+                            }
+                        }
+                        stage('Terraform Destroy') {
+                            when {
+                                expression {
+                                    "${env.TERRAFORM_DESTROY}" == 'YES'
+                                }
+                            }
+                            steps {
+                                dir('terraform-modules/production') {
+                                    sh 'terraform destroy -var-file=terraform.tfvars --auto-approve'
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        success {
+            slackSend(color: 'good', message: "Pipeline Successful: ${env.JOB_NAME} ${env.BUILD_NUMBER} ${env.BUILD_URL}") 
+        }
+        failure {
+            slackSend(color: 'danger', message: "Pipeline Failed: ${env.JOB_NAME} ${env.BUILD_NUMBER} ${env.BUILD_URL}") 
+        }
+        aborted {
+            slackSend(color: 'warning', message: "Pipeline Aborted: ${env.JOB_NAME} ${env.BUILD_NUMBER} ${env.BUILD_URL}")
+        }
+        always {
+            echo "I always run."
+        }
+    }
+}
