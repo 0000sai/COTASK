@@ -48,3 +48,7 @@ If you find these helpful...
 🔔 Follow Vishakha Sadhwani for more Cloud & DevOps content
 ♻️ Share so more people can learn.
 Activate to view larger image,
+![Devops all in one](https://github.com/user-attachments/assets/c40cf6f2-5605-4b52-ae33-9cf9b8929017)
+
+
+
