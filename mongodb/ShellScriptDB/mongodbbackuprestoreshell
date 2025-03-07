@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# Configuration
+CONTAINER_NAME="mongodb"
+USERNAME="root"
+PASSWORD="rootpassword"
+AUTH_DB="admin"
+MONGO_HOST="localhost"
+MONGO_PORT="27017"
+
+# Backup retention (days)
+RETENTION_DAYS=7
+
+# Email configuration (Set your email for alerts)
+EMAIL="your_email@example.com"
+
+# Get date and time dynamically
+TODAY=$(date +"%d-%m-%Y")
+TIMESTAMP=$(date +"%H%M%S")
+
+# Backup directory
+BACKUP_DIR="/root/pod/$TODAY"
+
+# Log file
+LOG_FILE="/var/log/mongo_backup.log"
+
+# Ensure backup directory exists
+mkdir -p "$BACKUP_DIR"
+
+log_and_alert() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    echo "$1" | mail -s "MongoDB Backup Alert" $EMAIL
+}
+
+full_backup() {
+    log_and_alert "🔹 Taking full backup..."
+    BACKUP_PATH="$BACKUP_DIR/full-$TIMESTAMP"
+    if ! docker exec $CONTAINER_NAME mongodump --host=$MONGO_HOST --port=$MONGO_PORT --username=$USERNAME --password=$PASSWORD --authenticationDatabase=$AUTH_DB --out=/data/mongodump; then
+        log_and_alert "❌ Full backup failed!"
+        exit 1
+    fi
+    docker cp $CONTAINER_NAME:/data/mongodump $BACKUP_PATH
+    log_and_alert "✅ Full backup saved at: $BACKUP_PATH"
+}
+
+incremental_backup() {
+    log_and_alert "🔹 Taking incremental backup (Oplog)..."
+    BACKUP_PATH="$BACKUP_DIR/oplog-$TIMESTAMP"
+    if ! docker exec $CONTAINER_NAME mongodump --username $USERNAME --password $PASSWORD -d local -c oplog.rs --out /data/oplog; then
+        log_and_alert "❌ Incremental backup failed!"
+        exit 1
+    fi
+    docker cp $CONTAINER_NAME:/data/oplog $BACKUP_PATH
+    log_and_alert "✅ Incremental backup (oplog) saved at: $BACKUP_PATH"
+}
+
+restore_backup() {
+    log_and_alert "🔹 Restoring full backup..."
+    read -p "Enter full backup path: " FULL_PATH
+    read -p "Enter oplog backup path (optional, press Enter to skip): " OPLOG_PATH
+    if [ ! -d "$FULL_PATH" ]; then
+        log_and_alert "❌ Error: Full backup path does not exist!"
+        exit 1
+    fi
+    docker cp "$FULL_PATH" $CONTAINER_NAME:/data/mongodump
+    docker exec $CONTAINER_NAME mongorestore --host=$MONGO_HOST --port=$MONGO_PORT -u $USERNAME -p $PASSWORD --authenticationDatabase=$AUTH_DB --dir=/data/mongodump --drop
+    if [ -n "$OPLOG_PATH" ] && [ -d "$OPLOG_PATH" ]; then
+        docker cp "$OPLOG_PATH" $CONTAINER_NAME:/data/oplog
+        docker exec $CONTAINER_NAME mongorestore --oplogReplay /data/oplog
+    fi
+    log_and_alert "✅ Restore completed!"
+}
+
+cleanup_old_backups() {
+    log_and_alert "🔹 Deleting backups older than $RETENTION_DAYS days..."
+    find /root/pod/ -type d -mtime +$RETENTION_DAYS -exec rm -rf {} \;
+    log_and_alert "✅ Old backups deleted!"
+}
+
+case "$1" in
+    full) full_backup ;;
+    incr) incremental_backup ;;
+    restore) restore_backup ;;
+    cleanup) cleanup_old_backups ;;
+    *) echo "Usage: $0 {full|incr|restore|cleanup}" ;;
+esac
