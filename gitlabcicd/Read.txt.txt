@@ -1,4 +1,7 @@
-https://youtu.be/YTB8pMPsj8c?si=uqxYCTsAu69jTOWY   CEN IDEA 
+https://youtu.be/YTB8pMPsj8c?si=uqxYCTsAu69jTOWY   CEN IDEA   
+
+https://youtube.com/playlist?list=PLCBfNy4uo0AL5wnp7XUdz66cXREr1RuxC&si=7EnXcO_MuFIswv4U
+----------------------------------------------------------------------------
 
 Optimizing Your GitLab Pipelines: Discover powerful strategies and techniques to optimize your pipeline performance and make your builds lightning-fast.
 Using GitLab Includes for Reusable CI/CD Configurations: Learn how to use the include directive to modularize and reuse pipeline configurations across multiple projects.
