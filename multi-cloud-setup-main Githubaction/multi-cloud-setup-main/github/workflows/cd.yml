@@ -1,0 +1,150 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/cd.yml'
+
+jobs:
+  check-bootstrap:
+    name: Check Bootstrap Status
+    runs-on: ubuntu-latest
+    outputs:
+      bootstrap_needed: ${{ steps.check-s3.outputs.bootstrap_needed }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Check if S3 bucket exists
+        id: check-s3
+        run: |
+          if aws s3 ls "s3://terraform-state-demo-app" 2>&1 | grep -q 'NoSuchBucket'; then
+            echo "bootstrap_needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "bootstrap_needed=false" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-bootstrap:
+    name: Terraform Bootstrap
+    needs: check-bootstrap
+    if: needs.check-bootstrap.outputs.bootstrap_needed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.0.0
+
+      - name: Bootstrap Infrastructure
+        run: |
+          cd terraform/bootstrap
+          terraform init
+          terraform apply -auto-approve
+
+  terraform-plan:
+    name: Terraform Plan
+    needs: [check-bootstrap]
+    if: needs.check-bootstrap.outputs.bootstrap_needed == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure GCP credentials
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.0.0
+
+      - name: Get Changed Files
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            terraform/**
+
+      - name: Plan AWS Infrastructure
+        if: contains(steps.changed-files.outputs.all_changed_files, 'terraform/aws/')
+        run: |
+          cd terraform/aws
+          terraform init
+          terraform plan
+
+      - name: Plan GCP Infrastructure
+        if: contains(steps.changed-files.outputs.all_changed_files, 'terraform/gcp/')
+        run: |
+          cd terraform/gcp
+          terraform init
+          terraform plan
+
+  terraform-apply:
+    name: Terraform Apply
+    needs: [terraform-plan, check-bootstrap]
+    if: needs.check-bootstrap.outputs.bootstrap_needed == 'false'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure GCP credentials
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.0.0
+
+      - name: Get Changed Files
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            terraform/**
+
+      - name: Apply AWS Infrastructure
+        if: contains(steps.changed-files.outputs.all_changed_files, 'terraform/aws/')
+        run: |
+          cd terraform/aws
+          terraform init
+          terraform apply -auto-approve
+
+      - name: Apply GCP Infrastructure
+        if: contains(steps.changed-files.outputs.all_changed_files, 'terraform/gcp/')
+        run: |
+          cd terraform/gcp
+          terraform init
+          terraform apply -auto-approve

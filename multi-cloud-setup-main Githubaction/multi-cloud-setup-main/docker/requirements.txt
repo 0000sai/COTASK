@@ -1,0 +1,5 @@
+flask==2.2.5
+werkzeug==3.0.6
+gunicorn==22.0.0
+prometheus-flask-exporter==0.18.2
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability

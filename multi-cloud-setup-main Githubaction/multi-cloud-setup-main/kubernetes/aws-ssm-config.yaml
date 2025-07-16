@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssm-sa
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::YOUR_ACCOUNT_ID:role/eks-ssm-role
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ssm-role
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ssm-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ssm-role
+subjects:
+- kind: ServiceAccount
+  name: ssm-sa
+  namespace: default
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: aws-secrets
+spec:
+  provider: aws
+  parameters:
+    objects: |
+      - objectName: "/demo-app/postgres-password"
+        objectType: "ssmparameter"
+        objectAlias: "postgres_password"
+      - objectName: "/demo-app/mysql-password"
+        objectType: "ssmparameter"
+        objectAlias: "mysql_password"
+  secretObjects:
+    - secretName: db-credentials
+      type: Opaque
+      data:
+        - objectName: postgres_password
+          key: POSTGRES_PASSWORD
+        - objectName: mysql_password
+          key: MYSQL_ROOT_PASSWORD

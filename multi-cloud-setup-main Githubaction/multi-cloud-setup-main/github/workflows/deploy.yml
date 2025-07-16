@@ -1,0 +1,114 @@
+name: Deploy Services
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'kubernetes/**'
+      - 'docker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+
+jobs:
+  check-changes:
+    name: Check Service Changes
+    runs-on: ubuntu-latest
+    outputs:
+      service_updated: ${{ steps.check-updates.outputs.service_updated }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Get Changed Files
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            kubernetes/**
+            docker/**
+
+      - name: Check for Service Updates
+        id: check-updates
+        run: |
+          if [[ -n "${{ steps.changed-files.outputs.all_changed_files }}" ]] || [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "service_updated=true" >> $GITHUB_OUTPUT
+          else
+            echo "service_updated=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-kubernetes:
+    name: Deploy to Kubernetes
+    needs: check-changes
+    if: needs.check-changes.outputs.service_updated == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure GCP credentials
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up kubectl for AWS
+        uses: aws-actions/eks-get-token@v1
+        with:
+          cluster_name: demo-cluster
+          aws-region: us-east-1
+
+      - name: Get Latest Image Tag
+        id: get-tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            # Get tag from the CI pipeline
+            echo "image_tag=$(aws ecr describe-images --repository-name demo-app --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' --output text)" >> $GITHUB_OUTPUT
+          else
+            # Use commit SHA for direct pushes
+            echo "image_tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Kubernetes Manifests
+        run: |
+          # Update image tag in deployment
+          sed -i "s|demo-app:.*|demo-app:${{ steps.get-tag.outputs.image_tag }}|g" kubernetes/deployment.yaml
+
+      - name: Deploy to AWS EKS
+        run: |
+          kubectl apply -f kubernetes/aws-ssm-config.yaml
+          kubectl apply -f kubernetes/rbac.yaml
+          kubectl apply -f kubernetes/deployment.yaml
+          
+          # Wait for rollout
+          kubectl rollout status deployment/demo-app
+
+      - name: Set up kubectl for GCP
+        run: |
+          gcloud container clusters get-credentials demo-cluster \
+            --region us-central1
+
+      - name: Deploy to GCP GKE
+        run: |
+          kubectl apply -f kubernetes/aws-ssm-config.yaml
+          kubectl apply -f kubernetes/rbac.yaml
+          kubectl apply -f kubernetes/deployment.yaml
+          
+          # Wait for rollout
+          kubectl rollout status deployment/demo-app
+
+      - name: Verify Deployment
+        run: |
+          # Check AWS EKS
+          kubectl get pods -l app=demo-app -o wide
+          
+          # Switch context to GCP GKE
+          gcloud container clusters get-credentials demo-cluster --region us-central1
+          kubectl get pods -l app=demo-app -o wide
