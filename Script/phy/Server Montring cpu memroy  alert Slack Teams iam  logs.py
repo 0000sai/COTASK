@@ -417,7 +417,7 @@ drwxrwxr-x  2 ubuntu ubuntu  4096 Sep 11 13:40 .
 drwxr-x--- 20 ubuntu ubuntu  4096 Sep 12 13:46 ..
 -rw-rw-r--  1 ubuntu ubuntu 37055 Sep 12 13:59 prod_cleanup.log
 -rw-rw-r--  1 ubuntu ubuntu   702 Sep 12 10:42 prod_cleanup_shell.log
-u", "euid": 1000, "iam_role": "none", "iam_user": "arn:aws:iam::050943451137:user/tharunteja", "iam_account": "050943451137", "event": "monitor", "detail": "System stats displayed"}
+u", "euid": 1000, "iam_role": "none", "iam_user": "arn:aws:iam::050943451137:user/vishnu", "iam_account": "050943451137", "event": "monitor", "detail": "System stats displayed"}
 {"ts": "2025-09-12T13:48:45Z", "linux_user": "ubuntu", "sudo_user": "ubuntu", "linux_groups": "adm,dialout,cdrom,floppy,sudo,audio,dip,video,plugdev,netdev,lxd,docker,ubuntu", "euid": 1000, "iam_role": "none", "iam_user": "arn:aws:iam::050943451137:user/tharunteja", "iam_account": "050943451137", "event": "monitor", "detail": "Top CPU and memory processes displayed"}
 {"ts": "2025-09-12T13:48:45Z", "linux_user": "ubuntu", "sudo_user": "ubuntu", "linux_groups": "adm,dialout,cdrom,floppy,sudo,audio,dip,video,plugdev,netdev,lxd,docker,ubuntu", "euid": 1000, "iam_role": "none", "iam_user": "arn:aws:iam::050943451137:user/tharunteja", "iam_account": "050943451137", "event": "ebs", "detail": "EBS volumes listed"}
 {"ts": "2025-09-12T13:49:07Z", "linux_user": "ubuntu", "sudo_user": "ubuntu", "linux_groups": "adm,dialout,cdrom,floppy,sudo,audio,dip,video,plugdev,netdev,lxd,docker,ubuntu", "euid": 1000, "iam_role": "none", "iam_user": "arn:aws:iam::050943451137:user/tharunteja", "iam_account": "050943451137", "event": "disk", "detail": "Top storage usage scanned in path /"}
