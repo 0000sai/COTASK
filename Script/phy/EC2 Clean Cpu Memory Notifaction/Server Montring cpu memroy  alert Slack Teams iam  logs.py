@@ -319,7 +319,7 @@ Filesystem      Size  Used Avail Use% Mounted on
 /dev/xvda15     105M  6.1M   99M   6% /boot/efi
 
 IAM Role: none
-IAM User: arn:aws:iam::050943451137:user/tharunteja
+IAM User: arn:aws:iam::050943451137:user/vishnu
 IAM Account: 050943451137
 
 ======= TOP 20 CPU PROCESSES =======
