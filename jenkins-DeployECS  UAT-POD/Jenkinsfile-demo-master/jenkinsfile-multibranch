@@ -1,0 +1,21 @@
+pipeine {
+  agent any
+  options {
+    disableConcurrentBuilds()
+  }
+  stages {
+    stage('initial') {
+      steps {
+        echo 'hello'
+      }
+    }
+    stage('PR only') {
+      when {
+        branch "PR-*"
+      }
+      steps {
+        echo 'PR Step!'
+      }
+    }
+  }
+}
